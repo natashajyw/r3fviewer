@@ -1,121 +1,443 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { Canvas, useLoader } from '@react-three/fiber'
+import { CameraControls, Center, Environment } from '@react-three/drei'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { PCDLoader } from 'three/examples/jsm/loaders/PCDLoader.js'
 
-function App() {
-  const [count, setCount] = useState(0)
+type HoldHandlers = {
+  onPointerDown: React.PointerEventHandler<HTMLButtonElement>
+  onPointerUp: React.PointerEventHandler<HTMLButtonElement>
+  onPointerCancel: React.PointerEventHandler<HTMLButtonElement>
+  onPointerLeave: React.PointerEventHandler<HTMLButtonElement>
+  onContextMenu: React.MouseEventHandler<HTMLButtonElement>
+}
 
+function useHoldAction(action: (dtSeconds: number) => void): HoldHandlers {
+  const rafIdRef = useRef<number | null>(null)
+  const lastTRef = useRef<number | null>(null)
+  const holdingRef = useRef(false)
+
+  const stop = useCallback(() => {
+    holdingRef.current = false
+    lastTRef.current = null
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+  }, [])
+
+  const loop = useCallback(
+    (t: number) => {
+      if (!holdingRef.current) return
+      const last = lastTRef.current ?? t
+      const dt = Math.min(0.05, Math.max(0, (t - last) / 1000))
+      lastTRef.current = t
+      action(dt)
+      rafIdRef.current = requestAnimationFrame(loop)
+    },
+    [action],
+  )
+
+  const start = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>) => {
+      e.preventDefault()
+      e.currentTarget.setPointerCapture(e.pointerId)
+      holdingRef.current = true
+      if (rafIdRef.current == null) {
+        rafIdRef.current = requestAnimationFrame(loop)
+      }
+    },
+    [loop],
+  )
+
+  useEffect(() => {
+    const onUp = () => stop()
+    window.addEventListener('pointerup', onUp, { passive: true })
+    window.addEventListener('pointercancel', onUp, { passive: true })
+    window.addEventListener('blur', onUp)
+    return () => {
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('blur', onUp)
+      stop()
+    }
+  }, [stop])
+
+  return {
+    onPointerDown: start,
+    onPointerUp: stop,
+    onPointerCancel: stop,
+    onPointerLeave: stop,
+    onContextMenu: (e) => e.preventDefault(),
+  }
+}
+
+type JoystickHandlers = {
+  onPointerDown: React.PointerEventHandler<HTMLDivElement>
+  onPointerMove: React.PointerEventHandler<HTMLDivElement>
+  onPointerUp: React.PointerEventHandler<HTMLDivElement>
+  onPointerCancel: React.PointerEventHandler<HTMLDivElement>
+  onPointerLeave: React.PointerEventHandler<HTMLDivElement>
+  onContextMenu: React.MouseEventHandler<HTMLDivElement>
+}
+
+function useJoystickAction(
+  action: (dtSeconds: number, x: number, y: number) => void,
+): {
+  handlers: JoystickHandlers
+  knob: { x: number; y: number; active: boolean }
+} {
+  const rafIdRef = useRef<number | null>(null)
+  const lastTRef = useRef<number | null>(null)
+  const holdingRef = useRef(false)
+  const pointerIdRef = useRef<number | null>(null)
+  const baseRef = useRef<{ x: number; y: number } | null>(null)
+  const vecRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
+  const [knob, setKnob] = useState<{ x: number; y: number; active: boolean }>({
+    x: 0,
+    y: 0,
+    active: false,
+  })
+
+  const stop = useCallback(() => {
+    holdingRef.current = false
+    pointerIdRef.current = null
+    baseRef.current = null
+    vecRef.current = { x: 0, y: 0 }
+    setKnob({ x: 0, y: 0, active: false })
+    lastTRef.current = null
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+  }, [])
+
+  const loop = useCallback(
+    (t: number) => {
+      if (!holdingRef.current) return
+      const last = lastTRef.current ?? t
+      const dt = Math.min(0.05, Math.max(0, (t - last) / 1000))
+      lastTRef.current = t
+      const v = vecRef.current
+      action(dt, v.x, v.y)
+      rafIdRef.current = requestAnimationFrame(loop)
+    },
+    [action],
+  )
+
+  const updateFromEvent = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!holdingRef.current) return
+    if (pointerIdRef.current != null && e.pointerId !== pointerIdRef.current) return
+    const base = baseRef.current
+    if (!base) return
+
+    const dx = e.clientX - base.x
+    const dy = e.clientY - base.y
+    const radius = 28
+    const mag = Math.hypot(dx, dy)
+    const clamped = mag > radius && mag > 0 ? radius / mag : 1
+    const nx = (dx * clamped) / radius
+    const ny = (dy * clamped) / radius
+    const dead = 0.12
+    const fx = Math.abs(nx) < dead ? 0 : nx
+    const fy = Math.abs(ny) < dead ? 0 : ny
+    vecRef.current = { x: fx, y: fy }
+    setKnob({ x: nx, y: ny, active: true })
+  }, [])
+
+  useEffect(() => {
+    const onUp = () => stop()
+    window.addEventListener('pointerup', onUp, { passive: true })
+    window.addEventListener('pointercancel', onUp, { passive: true })
+    window.addEventListener('blur', onUp)
+    return () => {
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('blur', onUp)
+      stop()
+    }
+  }, [stop])
+
+  const handlers: JoystickHandlers = {
+    onPointerDown: (e) => {
+      e.preventDefault()
+      e.currentTarget.setPointerCapture(e.pointerId)
+      pointerIdRef.current = e.pointerId
+      baseRef.current = { x: e.clientX, y: e.clientY }
+      holdingRef.current = true
+      setKnob((k) => ({ ...k, active: true }))
+      updateFromEvent(e)
+      if (rafIdRef.current == null) rafIdRef.current = requestAnimationFrame(loop)
+    },
+    onPointerMove: (e) => {
+      e.preventDefault()
+      updateFromEvent(e)
+    },
+    onPointerUp: () => stop(),
+    onPointerCancel: () => stop(),
+    onPointerLeave: () => stop(),
+    onContextMenu: (e) => e.preventDefault(),
+  }
+
+  return { handlers, knob }
+}
+
+function MeshModel() {
+  const gltf = useLoader(GLTFLoader, '/mesh.glb')
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+    <Center>
+      <primitive object={gltf.scene} />
+    </Center>
   )
 }
 
-export default App
+function PointCloud() {
+  const points = useLoader(PCDLoader, '/pointcloud.pcd')
+
+  const material = points.material as THREE.PointsMaterial
+  if (material) {
+    material.size = 0.05
+    material.sizeAttenuation = true
+  }
+
+  return <primitive object={points} />
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<'mesh' | 'pointcloud'>('mesh')
+  const controlsRef = useRef<any>(null)
+  const rates = useMemo(
+    () => ({
+      truckPerSecond: 15.0,
+      rotatePerSecond: Math.PI / 1.6,
+      dollyPerSecond: 15.0,
+    }),
+    [],
+  )
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => controlsRef.current?.reset(true))
+    return () => cancelAnimationFrame(id)
+  }, [activeTab])
+
+  const zoomInHold = useHoldAction((dt) => controlsRef.current?.dolly(rates.dollyPerSecond * dt, false))
+  const zoomOutHold = useHoldAction((dt) => controlsRef.current?.dolly(-rates.dollyPerSecond * dt, false))
+
+  const panStick = useJoystickAction((dt, x, y) => {
+    // x: right+, y: down+ (screen space)
+    controlsRef.current?.truck(x * rates.truckPerSecond * dt, y * rates.truckPerSecond * dt, false)
+  })
+
+  const rotateStick = useJoystickAction((dt, x, y) => {
+    controlsRef.current?.rotate(-x * rates.rotatePerSecond * dt, -y * rates.rotatePerSecond * dt, false)
+  })
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 12,
+          left: 12,
+          zIndex: 10,
+          display: 'flex',
+          gap: 8,
+          padding: 6,
+          borderRadius: 12,
+          background: 'rgba(0,0,0,0.35)',
+          backdropFilter: 'blur(10px)',
+          WebkitBackdropFilter: 'blur(10px)',
+          border: '1px solid rgba(255,255,255,0.12)',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setActiveTab('mesh')}
+          aria-pressed={activeTab === 'mesh'}
+          style={{
+            cursor: 'pointer',
+            borderRadius: 10,
+            border: '1px solid rgba(255,255,255,0.18)',
+            padding: '8px 10px',
+            fontSize: 13,
+            lineHeight: 1,
+            color: activeTab === 'mesh' ? '#111' : 'rgba(255,255,255,0.9)',
+            background: activeTab === 'mesh' ? '#fff' : 'rgba(0,0,0,0.2)',
+          }}
+        >
+          Mesh
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('pointcloud')}
+          aria-pressed={activeTab === 'pointcloud'}
+          style={{
+            cursor: 'pointer',
+            borderRadius: 10,
+            border: '1px solid rgba(255,255,255,0.18)',
+            padding: '8px 10px',
+            fontSize: 13,
+            lineHeight: 1,
+            color:
+              activeTab === 'pointcloud' ? '#111' : 'rgba(255,255,255,0.9)',
+            background:
+              activeTab === 'pointcloud' ? '#fff' : 'rgba(0,0,0,0.2)',
+          }}
+        >
+          Point cloud
+        </button>
+      </div>
+      <div
+        style={{
+          position: 'absolute',
+          right: 12,
+          bottom: 12,
+          zIndex: 10,
+          display: 'grid',
+          gap: 10,
+          padding: 10,
+          borderRadius: 14,
+          background: 'rgba(0,0,0,0.35)',
+          backdropFilter: 'blur(10px)',
+          WebkitBackdropFilter: 'blur(10px)',
+          border: '1px solid rgba(255,255,255,0.12)',
+          color: 'rgba(255,255,255,0.9)',
+          userSelect: 'none',
+        }}
+      >
+        <div style={{ display: 'grid', gap: 6 }}>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Pan</div>
+          <Joystick label="Pan stick" knob={panStick.knob} handlers={panStick.handlers} />
+        </div>
+
+        <div style={{ display: 'grid', gap: 6 }}>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Rotate</div>
+          <Joystick label="Rotate stick" knob={rotateStick.knob} handlers={rotateStick.handlers} />
+        </div>
+
+        <div style={{ display: 'grid', gap: 6 }}>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Zoom</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button
+              type="button"
+              {...zoomInHold}
+              style={controlButtonStyle}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              {...zoomOutHold}
+              style={controlButtonStyle}
+            >
+              −
+            </button>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => controlsRef.current?.reset(true)}
+          style={{ ...controlButtonStyle, padding: '10px 12px', height: 44 }}
+          aria-label="Reset view"
+          title="Reset view"
+        >
+          Reset view
+        </button>
+      </div>
+      <Canvas
+        camera={{ position: [0, 0, 8], fov: 60 }}
+        gl={{
+          antialias: true,
+          toneMapping: THREE.ACESFilmicToneMapping,
+        }}
+        onCreated={({ gl }) => {
+          gl.toneMappingExposure = 1.35
+        }}
+      >
+        <color attach="background" args={['#111']} />
+        <ambientLight intensity={4} />
+        <directionalLight position={[5, 5, 5]} intensity={5} />
+        <directionalLight position={[-5, 5, -5]} intensity={5} />
+        <directionalLight position={[0, 5, 0]} intensity={5} />
+        <axesHelper args={[2]} />
+
+        <Suspense fallback={null}>
+          <Environment preset="city" />
+          {activeTab === 'mesh' ? <MeshModel /> : <PointCloud />}
+        </Suspense>
+
+        <CameraControls ref={controlsRef} makeDefault />
+      </Canvas>
+    </div>
+  )
+}
+
+const controlButtonStyle: React.CSSProperties = {
+  cursor: 'pointer',
+  borderRadius: 10,
+  border: '1px solid rgba(255,255,255,0.18)',
+  padding: '8px 10px',
+  fontSize: 13,
+  lineHeight: 1,
+  color: 'rgba(255,255,255,0.92)',
+  background: 'rgba(0,0,0,0.2)',
+}
+
+function Joystick({
+  label,
+  knob,
+  handlers,
+}: {
+  label: string
+  knob: { x: number; y: number; active: boolean }
+  handlers: JoystickHandlers
+}) {
+  const radius = 28
+  const size = radius * 2 + 16
+  const knobPxX = knob.x * radius
+  const knobPxY = knob.y * radius
+
+  return (
+    <div
+      role="application"
+      aria-label={label}
+      {...handlers}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 999,
+        border: '1px solid rgba(255,255,255,0.18)',
+        background: knob.active ? 'rgba(0,0,0,0.28)' : 'rgba(0,0,0,0.18)',
+        position: 'relative',
+        touchAction: 'none',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+    >
+      <div
+        style={{
+          width: radius * 2,
+          height: radius * 2,
+          borderRadius: 999,
+          background: 'radial-gradient(circle at 30% 30%, rgba(255,255,255,0.22), rgba(255,255,255,0) 55%)',
+          border: '1px dashed rgba(255,255,255,0.18)',
+          opacity: 0.9,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          width: 30,
+          height: 30,
+          borderRadius: 999,
+          border: '1px solid rgba(255,255,255,0.22)',
+          background: 'rgba(255,255,255,0.14)',
+          transform: `translate(${knobPxX}px, ${knobPxY}px)`,
+          boxShadow: 'rgba(0,0,0,0.35) 0 10px 16px -8px',
+        }}
+      />
+    </div>
+  )
+}
