@@ -1,9 +1,162 @@
-import { Canvas, useLoader } from '@react-three/fiber'
-import { CameraControls, Center, Environment } from '@react-three/drei'
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Canvas, useFrame, useLoader } from '@react-three/fiber'
+import { CameraControls, Center, Environment, Html } from '@react-three/drei'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { PCDLoader } from 'three/examples/jsm/loaders/PCDLoader.js'
+
+type LodKey = 'ultralow' | 'low' | 'mid' | 'high' | 'full'
+
+function LODCell({ lods, center, material }: {
+  lods: Record<LodKey, THREE.BufferGeometry>
+  center: THREE.Vector3
+  material: THREE.ShaderMaterial
+}) {
+  const [activeLod, setActiveLod] = useState<LodKey>('ultralow')
+  const activeLodRef = useRef<LodKey>('ultralow')
+  const prevDist = useRef(Infinity)
+
+  useFrame(({ camera }) => {
+    const dist = camera.position.distanceTo(center)
+    if (Math.abs(dist - prevDist.current) < 0.3) return
+    prevDist.current = dist
+
+    const next: LodKey = dist > 40 ? 'ultralow'
+                       : dist > 25 ? 'low'
+                       : dist > 12 ? 'mid'
+                       : dist > 5  ? 'high'
+                       : 'full'
+
+    if (next !== activeLodRef.current) {
+      activeLodRef.current = next
+      setActiveLod(next)
+    }
+  })
+
+  return <points geometry={lods[activeLod]} material={material} />
+}
+
+function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry }) {
+  const [cells, setCells] = useState<{ lods: Record<LodKey, THREE.BufferGeometry>, center: THREE.Vector3 }[] | null>(null)
+  const material = useMemo(() => new THREE.ShaderMaterial({
+    vertexColors: true,
+    uniforms: {
+      pointSize: { value: 14.0 },
+      camPos: { value: new THREE.Vector3() },
+    },
+    vertexShader: `
+      varying vec3 vColor;
+      uniform float pointSize;
+      void main() {
+        vColor = color;
+        gl_PointSize = max(4.0, pointSize);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord * 2.0 - 1.0;
+        float r = dot(uv, uv);
+        if (r > 1.0) discard;
+        vec3 normal = normalize(vec3(uv, sqrt(1.0 - r)));
+        vec3 light = normalize(vec3(1.0, 2.0, 1.0));
+        float diffuse = max(dot(normal, light), 0.0);
+        float ambient = 0.3;
+        gl_FragColor = vec4(vColor * (ambient + diffuse * 0.7), 1.0);
+      }
+    `,
+  }), [])
+
+  useEffect(() => {
+    const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
+    
+    const pos = baseGeometry.getAttribute('position').array as Float32Array
+    const col = baseGeometry.getAttribute('color').array as Float32Array
+
+    // clone before transferring — PCDLoader still owns the originals
+    const posCopy = pos.slice()
+    const colCopy = col.slice()
+    worker.postMessage(
+      { positions: posCopy, colors: colCopy },
+      [posCopy.buffer, colCopy.buffer]
+    )
+
+    worker.onmessage = (e) => {
+      const rawCells = e.data as Array<{
+        center: [number, number, number]
+        ultralow: { positions: Float32Array, colors: Float32Array }
+        low:      { positions: Float32Array, colors: Float32Array }
+        mid:      { positions: Float32Array, colors: Float32Array }
+        high:     { positions: Float32Array, colors: Float32Array }
+        full:     { positions: Float32Array, colors: Float32Array }
+      }>
+      setCells(rawCells.map(cell => ({
+        center: new THREE.Vector3(...cell.center),
+        lods: {
+          ultralow: makeGeometry(cell.ultralow.positions, cell.ultralow.colors),
+          low:      makeGeometry(cell.low.positions,      cell.low.colors),
+          mid:      makeGeometry(cell.mid.positions,      cell.mid.colors),
+          high:     makeGeometry(cell.high.positions,     cell.high.colors),
+          full:     makeGeometry(cell.full.positions,     cell.full.colors),
+        }
+      })))
+      worker.terminate()
+    }
+
+    return () => worker.terminate()
+  }, [baseGeometry])
+
+  useFrame(({ camera }) => {
+    material.uniforms.camPos.value.copy(camera.position)
+  })
+
+  if (!cells) return null  // still processing in worker
+
+  return (
+    <>
+      {cells.map((cell, i) => (
+        <LODCell key={i} lods={cell.lods} center={cell.center} material={material} />
+      ))}
+    </>
+  )
+}
+
+function makeGeometry(positions: Float32Array, colors: Float32Array) {
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  return geo
+}
+
+function HtmlOverlayPanel({ children }: { children: ReactNode }) {
+  // Raw <div> cannot live under <Canvas>; Html portals DOM outside the R3F tree.
+  return (
+    <Html fullscreen style={{ pointerEvents: 'none' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 58,
+          left: 12,
+          zIndex: 10,
+          display: 'grid',
+          gap: 8,
+          padding: 10,
+          borderRadius: 14,
+          background: 'rgba(0,0,0,0.35)',
+          backdropFilter: 'blur(10px)',
+          WebkitBackdropFilter: 'blur(10px)',
+          border: '1px solid rgba(255,255,255,0.12)',
+          color: 'rgba(255,255,255,0.9)',
+          userSelect: 'none',
+          pointerEvents: 'auto',
+        }}
+      >
+        {children}
+      </div>
+    </Html>
+  )
+}
 
 type HoldHandlers = {
   onPointerDown: React.PointerEventHandler<HTMLButtonElement>
@@ -199,9 +352,63 @@ function PointCloud() {
   if (material) {
     material.size = 0.05
     material.sizeAttenuation = true
+    material.toneMapped = false
   }
 
-  return <primitive object={points} />
+  const baseGeometry = (points as any).geometry as THREE.BufferGeometry | undefined
+  const [mode, setMode] = useState<'raw' | 'lod'>('raw')
+
+  return (
+    <>
+      <HtmlOverlayPanel>
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Point cloud</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setMode('raw')}
+              aria-pressed={mode === 'raw'}
+              style={{
+                cursor: 'pointer',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.18)',
+                padding: '8px 10px',
+                fontSize: 13,
+                lineHeight: 1,
+                color: mode === 'raw' ? '#111' : 'rgba(255,255,255,0.9)',
+                background: mode === 'raw' ? '#fff' : 'rgba(0,0,0,0.2)',
+              }}
+            >
+              Raw
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('lod')}
+              aria-pressed={mode === 'lod'}
+              style={{
+                cursor: 'pointer',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.18)',
+                padding: '8px 10px',
+                fontSize: 13,
+                lineHeight: 1,
+                color: mode === 'lod' ? '#111' : 'rgba(255,255,255,0.9)',
+                background: mode === 'lod' ? '#fff' : 'rgba(0,0,0,0.2)',
+              }}
+            >
+              LOD Points
+            </button>
+          </div>
+        </div>
+      </HtmlOverlayPanel>
+
+      {mode === 'raw' ? (
+        <primitive object={points} />
+      ) : baseGeometry ? (
+        <LODPointCloud baseGeometry={baseGeometry} />
+      ) : null}
+    </>
+  )
 }
 
 export default function App() {
@@ -212,6 +419,7 @@ export default function App() {
       truckPerSecond: 15.0,
       rotatePerSecond: Math.PI / 1.6,
       dollyPerSecond: 15.0,
+      rollPerSecond: Math.PI / 2.2,
     }),
     [],
   )
@@ -232,6 +440,26 @@ export default function App() {
   const rotateStick = useJoystickAction((dt, x, y) => {
     controlsRef.current?.rotate(-x * rates.rotatePerSecond * dt, -y * rates.rotatePerSecond * dt, false)
   })
+
+  const rollBy = useCallback((angle: number) => {
+    const controls = controlsRef.current
+    const camera: THREE.PerspectiveCamera | THREE.OrthographicCamera | undefined = controls?.camera
+    if (!controls || !camera) return
+
+    const pos = new THREE.Vector3()
+    const target = new THREE.Vector3()
+    controls.getPosition?.(pos)
+    controls.getTarget?.(target)
+
+    const axis = target.sub(pos).normalize() // camera forward direction
+    if (!Number.isFinite(axis.x + axis.y + axis.z)) return
+
+    camera.up.applyAxisAngle(axis, angle).normalize()
+    controls.setLookAt?.(pos.x, pos.y, pos.z, target.x, target.y, target.z, false)
+  }, [])
+
+  const rollLeftHold = useHoldAction((dt) => rollBy(rates.rollPerSecond * dt))
+  const rollRightHold = useHoldAction((dt) => rollBy(-rates.rollPerSecond * dt))
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
@@ -313,7 +541,29 @@ export default function App() {
 
         <div style={{ display: 'grid', gap: 6 }}>
           <div style={{ fontSize: 12, opacity: 0.85 }}>Rotate</div>
-          <Joystick label="Rotate stick" knob={rotateStick.knob} handlers={rotateStick.handlers} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'center', gap: 8 }}>
+            <Joystick label="Rotate stick" knob={rotateStick.knob} handlers={rotateStick.handlers} />
+            <div style={{ display: 'grid', gap: 6 }}>
+              <button
+                type="button"
+                {...rollLeftHold}
+                style={{ ...controlButtonStyle, width: 44, height: 44, padding: 0 }}
+                aria-label="Roll left"
+                title="Roll left"
+              >
+                ↺
+              </button>
+              <button
+                type="button"
+                {...rollRightHold}
+                style={{ ...controlButtonStyle, width: 44, height: 44, padding: 0 }}
+                aria-label="Roll right"
+                title="Roll right"
+              >
+                ↻
+              </button>
+            </div>
+          </div>
         </div>
 
         <div style={{ display: 'grid', gap: 6 }}>
