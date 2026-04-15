@@ -21,10 +21,10 @@ function LODCell({ lods, center, material }: {
     if (Math.abs(dist - prevDist.current) < 0.3) return
     prevDist.current = dist
 
-    const next: LodKey = dist > 40 ? 'ultralow'
-                       : dist > 25 ? 'low'
-                       : dist > 12 ? 'mid'
-                       : dist > 5  ? 'high'
+    const next: LodKey = dist > 80 ? 'ultralow'
+                       : dist > 50 ? 'low'
+                       : dist > 24 ? 'mid'
+                       : dist > 10 ? 'high'
                        : 'full'
 
     if (next !== activeLodRef.current) {
@@ -43,19 +43,29 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
   const material = useMemo(() => new THREE.ShaderMaterial({
     vertexColors: true,
     uniforms: {
-      pointSize: { value: 10.0 },
-      camPos: { value: new THREE.Vector3() },
+      // World-space radius of each point disc. Tune this to match your cloud's
+      // point spacing — larger value = bigger discs = more solid surface.
+      pointSize:  { value: 0.05 },
+      // Physical screen height in px, updated every frame so perspective
+      // projection stays correct after window resize.
+      resolution: { value: 900 },
     },
     vertexShader: `
       varying vec3 vColor;
       uniform float pointSize;
-      uniform vec3 camPos;
+      uniform float resolution;
       void main() {
         vColor = color;
-        float dist = length((modelMatrix * vec4(position, 1.0)).xyz - camPos);
-        float size = pointSize * clamp(dist / 2.0, 1.0, 2.0);
-        gl_PointSize = max(2.5, size);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+        // Project world-space radius to screen pixels via perspective.
+        // depth (-mvPos.z) is used for correct perspective projection.
+        // sparsityScale is based on spherical distance so it stays uniform
+        // across a surface at any view angle, avoiding density gradients.
+        float depth = max(0.001, -mvPos.z);
+        float dist = length(mvPos.xyz);
+        float sparsityScale = clamp(sqrt(dist / 5.0), 1.0, 4.0);
+        gl_PointSize = max(2.0, pointSize * projectionMatrix[1][1] * resolution * 0.5 / depth * sparsityScale);
+        gl_Position = projectionMatrix * mvPos;
       }
     `,
     fragmentShader: `
@@ -74,8 +84,12 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
   }), [])
 
   useEffect(() => {
+    return () => { material.dispose() }
+  }, [material])
+
+  useEffect(() => {
     const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })
-    
+
     const pos = baseGeometry.getAttribute('position').array as Float32Array
     const col = baseGeometry.getAttribute('color').array as Float32Array
 
@@ -87,6 +101,8 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
       [posCopy.buffer, colCopy.buffer]
     )
 
+    let built: { lods: Record<LodKey, THREE.BufferGeometry>, center: THREE.Vector3 }[] | null = null
+
     worker.onmessage = (e) => {
       const rawCells = e.data as Array<{
         center: [number, number, number]
@@ -96,7 +112,7 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
         high:     { positions: Float32Array, colors: Float32Array }
         full:     { positions: Float32Array, colors: Float32Array }
       }>
-      setCells(rawCells.map(cell => ({
+      built = rawCells.map(cell => ({
         center: new THREE.Vector3(...cell.center),
         lods: {
           ultralow: makeGeometry(cell.ultralow.positions, cell.ultralow.colors),
@@ -105,15 +121,27 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
           high:     makeGeometry(cell.high.positions,     cell.high.colors),
           full:     makeGeometry(cell.full.positions,     cell.full.colors),
         }
-      })))
+      }))
+      setCells(built)
       worker.terminate()
     }
 
-    return () => worker.terminate()
+    return () => {
+      worker.terminate()
+      // Dispose any geometries that were built (covers both the case where the
+      // effect re-runs due to baseGeometry change and component unmount).
+      if (built) {
+        for (const cell of built) {
+          for (const geo of Object.values(cell.lods)) {
+            geo.dispose()
+          }
+        }
+      }
+    }
   }, [baseGeometry])
 
-  useFrame(({ camera }) => {
-    material.uniforms.camPos.value.copy(camera.position)
+  useFrame(({ gl }) => {
+    material.uniforms.resolution.value = gl.domElement.height
   })
 
   if (!cells) return null  // still processing in worker
