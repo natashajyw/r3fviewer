@@ -1,6 +1,6 @@
 import { Canvas, useFrame, useLoader } from '@react-three/fiber'
-import { CameraControls, Center, Environment, Html } from '@react-three/drei'
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { CameraControls, Center, Environment } from '@react-three/drei'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { PCDLoader } from 'three/examples/jsm/loaders/PCDLoader.js'
@@ -12,7 +12,7 @@ function LODCell({ lods, center, material }: {
   center: THREE.Vector3
   material: THREE.ShaderMaterial
 }) {
-  const [activeLod, setActiveLod] = useState<LodKey>('ultralow')
+  const meshRef = useRef<THREE.Points>(null)
   const activeLodRef = useRef<LodKey>('ultralow')
   const prevDist = useRef(Infinity)
 
@@ -29,11 +29,13 @@ function LODCell({ lods, center, material }: {
 
     if (next !== activeLodRef.current) {
       activeLodRef.current = next
-      setActiveLod(next)
+      if (meshRef.current) {
+        meshRef.current.geometry = lods[next]
+      }
     }
   })
 
-  return <points geometry={lods[activeLod]} material={material} />
+  return <points ref={meshRef} geometry={lods['ultralow']} material={material} />
 }
 
 function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry }) {
@@ -41,15 +43,18 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
   const material = useMemo(() => new THREE.ShaderMaterial({
     vertexColors: true,
     uniforms: {
-      pointSize: { value: 14.0 },
+      pointSize: { value: 10.0 },
       camPos: { value: new THREE.Vector3() },
     },
     vertexShader: `
       varying vec3 vColor;
       uniform float pointSize;
+      uniform vec3 camPos;
       void main() {
         vColor = color;
-        gl_PointSize = max(4.0, pointSize);
+        float dist = length((modelMatrix * vec4(position, 1.0)).xyz - camPos);
+        float size = pointSize * clamp(dist / 2.0, 1.0, 2.0);
+        gl_PointSize = max(2.5, size);
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
@@ -129,34 +134,6 @@ function makeGeometry(positions: Float32Array, colors: Float32Array) {
   return geo
 }
 
-function HtmlOverlayPanel({ children }: { children: ReactNode }) {
-  // Raw <div> cannot live under <Canvas>; Html portals DOM outside the R3F tree.
-  return (
-    <Html fullscreen style={{ pointerEvents: 'none' }}>
-      <div
-        style={{
-          position: 'absolute',
-          top: 58,
-          left: 12,
-          zIndex: 10,
-          display: 'grid',
-          gap: 8,
-          padding: 10,
-          borderRadius: 14,
-          background: 'rgba(0,0,0,0.35)',
-          backdropFilter: 'blur(10px)',
-          WebkitBackdropFilter: 'blur(10px)',
-          border: '1px solid rgba(255,255,255,0.12)',
-          color: 'rgba(255,255,255,0.9)',
-          userSelect: 'none',
-          pointerEvents: 'auto',
-        }}
-      >
-        {children}
-      </div>
-    </Html>
-  )
-}
 
 type HoldHandlers = {
   onPointerDown: React.PointerEventHandler<HTMLButtonElement>
@@ -345,7 +322,7 @@ function MeshModel() {
   )
 }
 
-function PointCloud() {
+function PointCloud({ mode }: { mode: 'raw' | 'lod' }) {
   const points = useLoader(PCDLoader, '/pointcloud.pcd')
 
   const material = points.material as THREE.PointsMaterial
@@ -356,63 +333,17 @@ function PointCloud() {
   }
 
   const baseGeometry = (points as any).geometry as THREE.BufferGeometry | undefined
-  const [mode, setMode] = useState<'raw' | 'lod'>('raw')
 
-  return (
-    <>
-      <HtmlOverlayPanel>
-        <div style={{ display: 'grid', gap: 8 }}>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Point cloud</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              onClick={() => setMode('raw')}
-              aria-pressed={mode === 'raw'}
-              style={{
-                cursor: 'pointer',
-                borderRadius: 10,
-                border: '1px solid rgba(255,255,255,0.18)',
-                padding: '8px 10px',
-                fontSize: 13,
-                lineHeight: 1,
-                color: mode === 'raw' ? '#111' : 'rgba(255,255,255,0.9)',
-                background: mode === 'raw' ? '#fff' : 'rgba(0,0,0,0.2)',
-              }}
-            >
-              Raw
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('lod')}
-              aria-pressed={mode === 'lod'}
-              style={{
-                cursor: 'pointer',
-                borderRadius: 10,
-                border: '1px solid rgba(255,255,255,0.18)',
-                padding: '8px 10px',
-                fontSize: 13,
-                lineHeight: 1,
-                color: mode === 'lod' ? '#111' : 'rgba(255,255,255,0.9)',
-                background: mode === 'lod' ? '#fff' : 'rgba(0,0,0,0.2)',
-              }}
-            >
-              LOD Points
-            </button>
-          </div>
-        </div>
-      </HtmlOverlayPanel>
-
-      {mode === 'raw' ? (
-        <primitive object={points} />
-      ) : baseGeometry ? (
-        <LODPointCloud baseGeometry={baseGeometry} />
-      ) : null}
-    </>
-  )
+  return mode === 'raw' ? (
+    <primitive object={points} />
+  ) : baseGeometry ? (
+    <LODPointCloud baseGeometry={baseGeometry} />
+  ) : null
 }
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'mesh' | 'pointcloud'>('mesh')
+  const [pointCloudMode, setPointCloudMode] = useState<'raw' | 'lod'>('raw')
   const controlsRef = useRef<any>(null)
   const rates = useMemo(
     () => ({
@@ -516,6 +447,64 @@ export default function App() {
           Point cloud
         </button>
       </div>
+      {activeTab === 'pointcloud' && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 58,
+            left: 12,
+            zIndex: 10,
+            display: 'grid',
+            gap: 8,
+            padding: 10,
+            borderRadius: 14,
+            background: 'rgba(0,0,0,0.35)',
+            backdropFilter: 'blur(10px)',
+            WebkitBackdropFilter: 'blur(10px)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            color: 'rgba(255,255,255,0.9)',
+            userSelect: 'none',
+          }}
+        >
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Point cloud</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setPointCloudMode('raw')}
+              aria-pressed={pointCloudMode === 'raw'}
+              style={{
+                cursor: 'pointer',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.18)',
+                padding: '8px 10px',
+                fontSize: 13,
+                lineHeight: 1,
+                color: pointCloudMode === 'raw' ? '#111' : 'rgba(255,255,255,0.9)',
+                background: pointCloudMode === 'raw' ? '#fff' : 'rgba(0,0,0,0.2)',
+              }}
+            >
+              Raw
+            </button>
+            <button
+              type="button"
+              onClick={() => setPointCloudMode('lod')}
+              aria-pressed={pointCloudMode === 'lod'}
+              style={{
+                cursor: 'pointer',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.18)',
+                padding: '8px 10px',
+                fontSize: 13,
+                lineHeight: 1,
+                color: pointCloudMode === 'lod' ? '#111' : 'rgba(255,255,255,0.9)',
+                background: pointCloudMode === 'lod' ? '#fff' : 'rgba(0,0,0,0.2)',
+              }}
+            >
+              LOD Points
+            </button>
+          </div>
+        </div>
+      )}
       <div
         style={{
           position: 'absolute',
@@ -615,7 +604,7 @@ export default function App() {
 
         <Suspense fallback={null}>
           <Environment preset="city" />
-          {activeTab === 'mesh' ? <MeshModel /> : <PointCloud />}
+          {activeTab === 'mesh' ? <MeshModel /> : <PointCloud mode={pointCloudMode} />}
         </Suspense>
 
         <CameraControls ref={controlsRef} makeDefault />
