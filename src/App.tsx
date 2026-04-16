@@ -6,15 +6,22 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { PCDLoader } from 'three/examples/jsm/loaders/PCDLoader.js'
 
 type LodKey = 'ultralow' | 'low' | 'mid' | 'high' | 'full'
+type PartialLods = Partial<Record<LodKey, THREE.BufferGeometry>> & { ultralow: THREE.BufferGeometry }
 
 function LODCell({ lods, center, material }: {
-  lods: Record<LodKey, THREE.BufferGeometry>
+  lods: PartialLods
   center: THREE.Vector3
   material: THREE.ShaderMaterial
 }) {
   const meshRef = useRef<THREE.Points>(null)
   const activeLodRef = useRef<LodKey>('ultralow')
   const prevDist = useRef(Infinity)
+
+  // When higher LODs arrive (lods object reference changes), force re-evaluation
+  // on the very next frame so the current camera position immediately upgrades.
+  useEffect(() => {
+    prevDist.current = Infinity
+  }, [lods])
 
   useFrame(({ camera }) => {
     const dist = camera.position.distanceTo(center)
@@ -30,7 +37,8 @@ function LODCell({ lods, center, material }: {
     if (next !== activeLodRef.current) {
       activeLodRef.current = next
       if (meshRef.current) {
-        meshRef.current.geometry = lods[next]
+        // Fall back to ultralow if the desired LOD isn't built yet
+        meshRef.current.geometry = lods[next] ?? lods['ultralow']
       }
     }
   })
@@ -38,8 +46,12 @@ function LODCell({ lods, center, material }: {
   return <points ref={meshRef} geometry={lods['ultralow']} material={material} />
 }
 
+type CellData = { lods: PartialLods; center: THREE.Vector3 }
+
 function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry }) {
-  const [cells, setCells] = useState<{ lods: Record<LodKey, THREE.BufferGeometry>, center: THREE.Vector3 }[] | null>(null)
+  const [cells, setCells] = useState<CellData[] | null>(null)
+  // Mutable ref so the phase-2 handler can update lods without a stale closure
+  const cellsRef = useRef<CellData[] | null>(null)
   const material = useMemo(() => new THREE.ShaderMaterial({
     vertexColors: true,
     uniforms: {
@@ -101,41 +113,58 @@ function LODPointCloud({ baseGeometry }: { baseGeometry: THREE.BufferGeometry })
       [posCopy.buffer, colCopy.buffer]
     )
 
-    let built: { lods: Record<LodKey, THREE.BufferGeometry>, center: THREE.Vector3 }[] | null = null
-
     worker.onmessage = (e) => {
-      const rawCells = e.data as Array<{
-        center: [number, number, number]
-        ultralow: { positions: Float32Array, colors: Float32Array }
-        low:      { positions: Float32Array, colors: Float32Array }
-        mid:      { positions: Float32Array, colors: Float32Array }
-        high:     { positions: Float32Array, colors: Float32Array }
-        full:     { positions: Float32Array, colors: Float32Array }
-      }>
-      built = rawCells.map(cell => ({
-        center: new THREE.Vector3(...cell.center),
-        lods: {
-          ultralow: makeGeometry(cell.ultralow.positions, cell.ultralow.colors),
-          low:      makeGeometry(cell.low.positions,      cell.low.colors),
-          mid:      makeGeometry(cell.mid.positions,      cell.mid.colors),
-          high:     makeGeometry(cell.high.positions,     cell.high.colors),
-          full:     makeGeometry(cell.full.positions,     cell.full.colors),
-        }
-      }))
-      setCells(built)
-      worker.terminate()
+      const msg = e.data
+
+      if (msg.phase === 'ultralow') {
+        // Phase 1: show the cloud immediately at 10% density
+        const phase1 = msg.cells as Array<{
+          center: [number, number, number]
+          ultralow: { positions: Float32Array, colors: Float32Array }
+        }>
+        const newCells: CellData[] = phase1.map(cell => ({
+          center: new THREE.Vector3(...cell.center),
+          lods: { ultralow: makeGeometry(cell.ultralow.positions, cell.ultralow.colors) },
+        }))
+        cellsRef.current = newCells
+        setCells(newCells)
+      } else if (msg.phase === 'higher') {
+        // Phase 2: upgrade each cell with denser LODs, giving each a new lods
+        // object reference so LODCell's useEffect resets its distance check.
+        const phase2 = msg.cells as Array<{
+          low:  { positions: Float32Array, colors: Float32Array }
+          mid:  { positions: Float32Array, colors: Float32Array }
+          high: { positions: Float32Array, colors: Float32Array }
+          full: { positions: Float32Array, colors: Float32Array }
+        }>
+        const existing = cellsRef.current
+        if (!existing) return
+        const upgraded: CellData[] = existing.map((cell, i) => ({
+          center: cell.center,
+          lods: {
+            ...cell.lods,
+            low:  makeGeometry(phase2[i]!.low.positions,  phase2[i]!.low.colors),
+            mid:  makeGeometry(phase2[i]!.mid.positions,  phase2[i]!.mid.colors),
+            high: makeGeometry(phase2[i]!.high.positions, phase2[i]!.high.colors),
+            full: makeGeometry(phase2[i]!.full.positions, phase2[i]!.full.colors),
+          },
+        }))
+        cellsRef.current = upgraded
+        setCells(upgraded)
+        worker.terminate()
+      }
     }
 
     return () => {
       worker.terminate()
-      // Dispose any geometries that were built (covers both the case where the
-      // effect re-runs due to baseGeometry change and component unmount).
-      if (built) {
-        for (const cell of built) {
+      // Dispose all geometries across both phases
+      if (cellsRef.current) {
+        for (const cell of cellsRef.current) {
           for (const geo of Object.values(cell.lods)) {
-            geo.dispose()
+            (geo as THREE.BufferGeometry).dispose()
           }
         }
+        cellsRef.current = null
       }
     }
   }, [baseGeometry])
