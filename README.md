@@ -5,7 +5,7 @@ An interactive 3D viewer for mesh models and point clouds, built with React Thre
 ## Features
 
 - **Dual viewing modes** — switch between mesh (GLB) and point cloud (PCD) views
-- **Spatial LOD for point clouds** — points partitioned into a 6×6×6 grid with 5 LOD levels (full → ultralow) based on camera distance, processed off-thread via Web Workers
+- **Streaming point cloud** — cloud appears immediately at 10% density as large spheres; higher-density LODs stream in progressively in the background via a two-phase Web Worker pipeline
 - **Custom shader rendering** — sphere-based point rendering with per-pixel lighting via GLSL vertex/fragment shaders
 - **Joystick camera controls** — pan, rotate, roll, zoom, and reset via on-screen controls with pointer event support (mouse and touch)
 - **ACES Filmic tone mapping** with environment lighting for realistic mesh rendering
@@ -48,16 +48,22 @@ Place your data files in `public/`:
 
 These files are git-ignored due to size.
 
-## LOD System
+## Streaming LOD System
 
-Point cloud data is partitioned spatially into a 6×6×6 grid (216 cells). Each cell is independently downsampled to 5 LOD levels using voxel-based sampling in a Web Worker:
+Point cloud data is processed entirely off-thread in a Web Worker. Loading happens in two phases to get pixels on screen as fast as possible:
 
-| Level | Density | Distance |
+**Phase 1 — immediate (ultralow)**
+The cloud is partitioned into a 6×6×6 grid (216 cells) and each cell is voxel-downsampled to 10% density. These ultralow geometries are transferred to the main thread right away, so the viewer renders the full cloud outline as large spheres before any further work is done.
+
+**Phase 2 — progressive upgrade (low → full)**
+With phase 1 already rendered, the worker builds four denser LOD levels for every cell and sends them in a second message. Once they arrive, each cell silently upgrades its available geometries without any visible pop.
+
+| Level | Density | Camera distance |
 |---|---|---|
-| `full` | 100% | Nearest |
-| `high` | 75% | — |
-| `mid` | 50% | — |
-| `low` | 25% | — |
-| `ultralow` | 10% | Farthest |
+| `full` | 100% | < 10 units |
+| `high` | 75% | 10 – 24 units |
+| `mid` | 50% | 24 – 50 units |
+| `low` | 25% | 50 – 80 units |
+| `ultralow` | 10% | > 80 units |
 
-The active LOD level per cell is determined each frame based on the camera's distance to that cell's center.
+Each frame, every cell checks the camera distance to its center and activates the appropriate LOD level. If phase 2 hasn't arrived yet, cells fall back to ultralow. Point size in the shader scales with distance — spheres appear larger when far away and shrink as the camera approaches a surface, giving a natural density gradient.
