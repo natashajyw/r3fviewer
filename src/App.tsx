@@ -401,6 +401,7 @@ function PointCloud({ mode }: { mode: 'raw' | 'lod' }) {
 export default function App() {
   const [activeTab, setActiveTab] = useState<'mesh' | 'pointcloud'>('mesh')
   const [pointCloudMode, setPointCloudMode] = useState<'raw' | 'lod'>('raw')
+  const [controlsMinimized, setControlsMinimized] = useState(false)
   const controlsRef = useRef<any>(null)
   const rates = useMemo(
     () => ({
@@ -580,67 +581,85 @@ export default function App() {
           userSelect: 'none',
         }}
       >
-        <div style={{ display: 'grid', gap: 6 }}>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Pan</div>
-          <Joystick label="Pan stick" knob={panStick.knob} handlers={panStick.handlers} />
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            onClick={() => setControlsMinimized(m => !m)}
+            style={controlsMinimized
+              ? { ...controlButtonStyle, width: 28, height: 28, padding: 0, fontSize: 15, lineHeight: 1 }
+              : { ...controlButtonStyle, padding: '4px 8px', fontSize: 12, lineHeight: 1, display: 'flex', alignItems: 'center', gap: 4 }}
+            aria-label={controlsMinimized ? 'Maximize controls' : 'Minimize controls'}
+            title={controlsMinimized ? 'Maximize controls' : 'Minimize controls'}
+          >
+            {controlsMinimized ? '▴' : <><span>Minimize</span><span style={{ fontSize: 10 }}>▾</span></>}
+          </button>
         </div>
 
-        <div style={{ display: 'grid', gap: 6 }}>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Rotate</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'center', gap: 8 }}>
-            <Joystick label="Rotate stick" knob={rotateStick.knob} handlers={rotateStick.handlers} />
+        {!controlsMinimized && (
+          <>
             <div style={{ display: 'grid', gap: 6 }}>
-              <button
-                type="button"
-                {...rollLeftHold}
-                style={{ ...controlButtonStyle, width: 44, height: 44, padding: 0 }}
-                aria-label="Roll left"
-                title="Roll left"
-              >
-                ↺
-              </button>
-              <button
-                type="button"
-                {...rollRightHold}
-                style={{ ...controlButtonStyle, width: 44, height: 44, padding: 0 }}
-                aria-label="Roll right"
-                title="Roll right"
-              >
-                ↻
-              </button>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Pan</div>
+              <Joystick label="Pan stick" knob={panStick.knob} handlers={panStick.handlers} />
             </div>
-          </div>
-        </div>
 
-        <div style={{ display: 'grid', gap: 6 }}>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Zoom</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Rotate</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'center', gap: 8 }}>
+                <Joystick label="Rotate stick" knob={rotateStick.knob} handlers={rotateStick.handlers} />
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <button
+                    type="button"
+                    {...rollLeftHold}
+                    style={{ ...controlButtonStyle, width: 44, height: 44, padding: 0 }}
+                    aria-label="Roll left"
+                    title="Roll left"
+                  >
+                    ↺
+                  </button>
+                  <button
+                    type="button"
+                    {...rollRightHold}
+                    style={{ ...controlButtonStyle, width: 44, height: 44, padding: 0 }}
+                    aria-label="Roll right"
+                    title="Roll right"
+                  >
+                    ↻
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Zoom</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                <button
+                  type="button"
+                  {...zoomInHold}
+                  style={controlButtonStyle}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  {...zoomOutHold}
+                  style={controlButtonStyle}
+                >
+                  −
+                </button>
+              </div>
+            </div>
+
             <button
               type="button"
-              {...zoomInHold}
-              style={controlButtonStyle}
+              onClick={() => controlsRef.current?.reset(true)}
+              style={{ ...controlButtonStyle, padding: '10px 12px', height: 44 }}
+              aria-label="Reset view"
+              title="Reset view"
             >
-              +
+              Reset view
             </button>
-            <button
-              type="button"
-              {...zoomOutHold}
-              style={controlButtonStyle}
-            >
-              −
-            </button>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => controlsRef.current?.reset(true)}
-          style={{ ...controlButtonStyle, padding: '10px 12px', height: 44 }}
-          aria-label="Reset view"
-          title="Reset view"
-        >
-          Reset view
-        </button>
+          </>
+        )}
       </div>
       <Canvas
         camera={{ position: [0, 0, 8], fov: 60 }}
